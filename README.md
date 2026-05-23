@@ -6,7 +6,7 @@ This custom node is a clean Flux/Flux.2-oriented implementation inspired by:
 
 Aryan Mikaeili, Or Patashnik, Andrea Tagliasacchi, Daniel Cohen-Or, Ali Mahdavi-Amiri, **“Untwisting RoPE: Frequency Control for Shared Attention in DiTs,”** arXiv:2602.05013, 2026. <https://arxiv.org/abs/2602.05013>
 
-It is designed for ComfyUI Flux-family models, including Flux.2 / Flux.2 Klein-style workflows, not for the Z-Image/NextDiT implementation that the unofficial source repo targeted.
+It is designed for ComfyUI Flux-family models.
 
 ## What it does
 
