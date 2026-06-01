@@ -510,11 +510,16 @@ class AnimaUntwistRoPE:
                 )
                 ref = ref_resized.view(Br, Cr, Tr, H_target_padded, W_target_padded)
 
-                # Blend noise with reference latent dynamically to match target active progress
+                # Blend noise with reference latent dynamically using variance-preserving DDPM scheduling
+                import math
+                scale_ref = math.sqrt(t_active)
+                scale_noise = math.sqrt(1.0 - t_active)
                 noise = torch.randn_like(ref)
-                ref = ref * t_active + noise * (1.0 - t_active)
+                ref = ref * scale_ref + noise * scale_noise
+
 
                 ref_padded = comfy.ldm.common_dit.pad_to_patch_size(ref, (patch_temporal, patch_spatial, patch_spatial))
+
                 
                 T_ref_padded = ref_padded.shape[2]
                 ref_len = (T_ref_padded // patch_temporal) * (H_target_padded // patch_spatial) * (W_target_padded // patch_spatial)
