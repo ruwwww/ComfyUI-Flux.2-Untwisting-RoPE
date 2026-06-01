@@ -509,6 +509,11 @@ class AnimaUntwistRoPE:
                     ref_reshaped, size=(H_target_padded, W_target_padded), mode="bilinear", align_corners=False
                 )
                 ref = ref_resized.view(Br, Cr, Tr, H_target_padded, W_target_padded)
+
+                # Blend noise with reference latent dynamically to match target noise level progress
+                noise = torch.randn_like(ref)
+                ref = ref * progress + noise * (1.0 - progress)
+
                 ref_padded = comfy.ldm.common_dit.pad_to_patch_size(ref, (patch_temporal, patch_spatial, patch_spatial))
                 
                 T_ref_padded = ref_padded.shape[2]
@@ -516,6 +521,7 @@ class AnimaUntwistRoPE:
                 
                 # Concatenate along T (dim 2)
                 input_x_with_ref = torch.cat([input_x_padded, ref_padded], dim=2)
+
 
             # Schedule our scales
             high_scale = lerp(base_high_start, base_high_end, progress)
