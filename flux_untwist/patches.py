@@ -268,9 +268,10 @@ def anima_untwist_self_attn_patch(
         return q, k, v
 
     # 3. Project ref_tokens to reference keys, values and queries
-    k_r = self.k_proj(ref_tokens)
-    v_r = self.v_proj(ref_tokens)
-    q_r = self.q_proj(ref_tokens)
+    ref_tokens_casted = ref_tokens.to(device=x.device, dtype=x.dtype)
+    k_r = self.k_proj(ref_tokens_casted)
+    v_r = self.v_proj(ref_tokens_casted)
+    q_r = self.q_proj(ref_tokens_casted)
 
     q_r, k_r, v_r = map(
         lambda t: rearrange(t, "b ... (h d) -> b ... h d", h=self.n_heads, d=self.head_dim),
@@ -282,8 +283,9 @@ def anima_untwist_self_attn_patch(
     v_r = self.v_norm(v_r)
 
     # 4. Apply RoPE to reference queries and keys using rope_emb_ref
-    q_r = apply_rotary_pos_emb(q_r, rope_emb_ref)
-    k_r = apply_rotary_pos_emb(k_r, rope_emb_ref)
+    rope_emb_ref_casted = rope_emb_ref.to(device=x.device, dtype=x.dtype)
+    q_r = apply_rotary_pos_emb(q_r, rope_emb_ref_casted)
+    k_r = apply_rotary_pos_emb(k_r, rope_emb_ref_casted)
 
     # 5. Build scale vector
     high_scale = float(cfg.get("high_scale", 1.0))
@@ -320,6 +322,10 @@ def anima_untwist_self_attn_patch(
     # 7. Concatenate target and reference keys/values along sequence dimension S (dim 1)
     k_out = torch.cat([k, k_r], dim=1)
     v_out = torch.cat([v, v_r], dim=1)
+
+    # Coerce to identical query dtype to avoid RuntimeError in scaled_dot_product_attention
+    k_out = k_out.to(dtype=q.dtype)
+    v_out = v_out.to(dtype=q.dtype)
 
     return q, k_out, v_out
 
