@@ -491,62 +491,50 @@ class AnimaUntwistRoPE:
             patch_temporal = getattr(dm, "patch_temporal", 1)
             patch_spatial = getattr(dm, "patch_spatial", 2)
 
-            ref_tokens = None
-            rope_emb_ref = None
-            ref_len = 0
+            input_x_padded = comfy.ldm.common_dit.pad_to_patch_size(input_x, (patch_temporal, patch_spatial, patch_spatial))
+            T_target_padded = input_x_padded.shape[2]
+            H_target_padded = input_x_padded.shape[3]
+            W_target_padded = input_x_padded.shape[4]
+            target_len = (T_target_padded // patch_temporal) * (H_target_padded // patch_spatial) * (W_target_padded // patch_spatial)
 
-            # Schedule our scales
-            high_scale = lerp(base_high_start, base_high_end, t_active)
-            low_scale = lerp(base_low_start, base_low_end, t_active)
+            ref_len = 0
+            input_x_with_ref = input_x_padded
 
             if ref_samples_cpu is not None and active:
                 # repeat to match input_x batch size
                 ref = ref_samples_cpu.to(device=input_x.device, dtype=input_x.dtype)
                 ref = repeat_to_batch(ref, int(input_x.shape[0]))
-                
-                # Blend noise with reference latent dynamically using variance-preserving DDPM scheduling
+
+                # Resize reference spatially to match target padded dimensions
+                Br, Cr, Tr, Hr, Wr = ref.shape
+                ref_reshaped = ref.view(Br * Tr, Cr, Hr, Wr)
+                ref_resized = torch.nn.functional.interpolate(
+                    ref_reshaped, size=(H_target_padded, W_target_padded), mode="bilinear", align_corners=False
+                )
+                ref = ref_resized.view(Br, Cr, Tr, H_target_padded, W_target_padded)
+
+                # Blend noise with reference latent dynamically using variance-preserving DDPM scheduling with a fixed seed
                 scale_ref = math.sqrt(t_active)
                 scale_noise = math.sqrt(1.0 - t_active)
-                # Draw consistent noise using a fixed-seed generator to ensure reference latent stability across steps
                 generator = torch.Generator(device=ref.device).manual_seed(42)
                 noise = torch.randn(ref.shape, generator=generator, device=ref.device, dtype=ref.dtype)
                 ref_noisy = ref * scale_ref + noise * scale_noise
 
-                # Patchify the reference latent at its own native resolution!
-                ref_noisy_padded = comfy.ldm.common_dit.pad_to_patch_size(ref_noisy, (patch_temporal, patch_spatial, patch_spatial))
-                if getattr(dm, "concat_padding_mask", False):
-                    padding_mask = torch.zeros(
-                        ref_noisy_padded.shape[0],
-                        1,
-                        ref_noisy_padded.shape[2],
-                        ref_noisy_padded.shape[3],
-                        ref_noisy_padded.shape[4],
-                        dtype=ref_noisy_padded.dtype,
-                        device=ref_noisy_padded.device
-                    )
-                    ref_noisy_padded = torch.cat([ref_noisy_padded, padding_mask], dim=1)
-                ref_embedded = dm.x_embedder(ref_noisy_padded)
-                
-                # Generate 3D RoPE for reference using its own native shape:
-                fps = c.get("fps", None)
-                if fps is not None and not isinstance(fps, (torch.Tensor, int, float)):
-                    if hasattr(fps, "value"):
-                        fps = fps.value
-                    elif isinstance(fps, list) and len(fps) > 0:
-                        fps = fps[0]
-                    else:
-                        fps = None
-                rope_emb_ref = dm.pos_embedder(ref_embedded, fps=fps, device=input_x.device)
-                rope_emb_ref = rope_emb_ref.unsqueeze(1).unsqueeze(0) # shape (1, 1, S_ref, D // 2, 2, 2)
-                
-                # Flatten to tokens
-                ref_tokens = rearrange(ref_embedded, "b t h w d -> b (t h w) d")
-                ref_len = ref_tokens.shape[1]
+                ref_padded = comfy.ldm.common_dit.pad_to_patch_size(ref_noisy, (patch_temporal, patch_spatial, patch_spatial))
+                T_ref_padded = ref_padded.shape[2]
+                ref_len = (T_ref_padded // patch_temporal) * (H_target_padded // patch_spatial) * (W_target_padded // patch_spatial)
+
+                # Concatenate along T (dim 2)
+                input_x_with_ref = torch.cat([input_x_padded, ref_padded], dim=2)
+
+            # Schedule our scales
+            high_scale = lerp(base_high_start, base_high_end, t_active)
+            low_scale = lerp(base_low_start, base_low_end, t_active)
 
             to["anima_untwist_rope"] = {
                 "enabled": bool(active and ref_len > 0),
-                "ref_tokens": ref_tokens,
-                "rope_emb_ref": rope_emb_ref,
+                "ref_ranges": [(target_len, target_len + ref_len)] if ref_len > 0 else [],
+                "target_range": (0, target_len),
                 "high_scale": high_scale,
                 "low_scale": low_scale,
                 "beta": base_beta,
@@ -561,22 +549,25 @@ class AnimaUntwistRoPE:
             if node_verbose:
                 print(
                     f"{_PREFIX} Anima call: progress={progress:.3f} active={active} "
-                    f"ref_len={ref_len} input_shape={tuple(input_x.shape)}"
+                    f"target_len={target_len} ref_len={ref_len} input_shape={tuple(input_x_with_ref.shape)}"
                 )
 
             if old_wrapper is not None:
                 out = old_wrapper(
                     apply_model,
                     {
-                        "input": input_x,
+                        "input": input_x_with_ref,
                         "timestep": timestep,
                         "c": c,
                         "cond_or_uncond": cond_or_uncond,
                     },
                 )
             else:
-                out = apply_model(input_x, timestep, **c)
+                out = apply_model(input_x_with_ref, timestep, **c)
 
+            # Slice back to target original shape
+            B_orig, C_orig, T_orig, H_orig, W_orig = input_x.shape
+            out = out[:, :, :T_orig, :H_orig, :W_orig]
             return out
 
 

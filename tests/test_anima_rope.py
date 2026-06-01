@@ -78,13 +78,11 @@ def test_anima_untwist_self_attn_patch():
 
     # Mock stack frame to inject transformer_options
     import sys
-    ref_tokens = torch.ones(1, 40, 2048)
-    rope_emb_ref = torch.ones(1, 40, 1, 64, 2, 2)
     transformer_options = {
         "anima_untwist_rope": {
             "enabled": True,
-            "ref_tokens": ref_tokens,
-            "rope_emb_ref": rope_emb_ref,
+            "ref_ranges": [(60, 100)],
+            "target_range": (0, 60),
             "high_scale": 0.25,
             "low_scale": 1.5,
             "beta": 2.0,
@@ -103,15 +101,14 @@ def test_anima_untwist_self_attn_patch():
 
     q_out, k_out, v_out = run_patched_call()
 
-    # Original target was 100 tokens, reference was 40 tokens.
-    # The concatenated k_out should have sequence length 140.
-    assert k_out.shape == (1, 140, 16, 128)
-    # target range [0, 100] should be unchanged (all 1s)
-    assert torch.allclose(k_out[:, :100, :, :], torch.ones(1, 100, 16, 128))
-    # ref range [100:140] should be scaled
+    # Original combined sequence was 100 tokens (60 target + 40 reference).
+    assert k_out.shape == (1, 100, 16, 128)
+    # target range [0, 60] should be unchanged (all 1s)
+    assert torch.allclose(k_out[:, :60, :, :], torch.ones(1, 60, 16, 128))
+    # ref range [60:100] should be scaled
     scale_vec = build_frequency_scale_vector(
         128, (44, 42, 42), 0.25, 1.5, 2.0, torch.device("cpu"), torch.float32
     ).view(1, 1, 1, -1)
-    expected_ref = torch.ones(1, 40, 16, 128) * scale_vec * 2.0
-    assert torch.allclose(k_out[:, 100:140, :, :], expected_ref)
+    expected_ref = torch.ones(1, 40, 16, 128) * scale_vec
+    assert torch.allclose(k_out[:, 60:100, :, :], expected_ref)
 
