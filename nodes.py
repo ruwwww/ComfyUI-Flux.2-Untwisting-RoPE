@@ -526,7 +526,15 @@ class AnimaUntwistRoPE:
                 ref_embedded = dm.x_embedder(ref_noisy_padded)
                 
                 # Generate 3D RoPE for reference using its own native shape:
-                rope_emb_ref = dm.pos_embedder(ref_embedded, device=input_x.device)
+                fps = c.get("fps", None)
+                if fps is not None and not isinstance(fps, (torch.Tensor, int, float)):
+                    if hasattr(fps, "value"):
+                        fps = fps.value
+                    elif isinstance(fps, list) and len(fps) > 0:
+                        fps = fps[0]
+                    else:
+                        fps = None
+                rope_emb_ref = dm.pos_embedder(ref_embedded, fps=fps, device=input_x.device)
                 rope_emb_ref = rope_emb_ref.unsqueeze(1).unsqueeze(0) # shape (1, 1, S_ref, D // 2, 2, 2)
                 
                 # Flatten to tokens
