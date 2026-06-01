@@ -2,10 +2,23 @@ import os
 import sys
 import traceback
 
-# Add repository root to python path so imports resolve correctly
+# Add repository root and ComfyUI root to python path so imports resolve correctly
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
+
+comfy_root = os.path.dirname(os.path.dirname(repo_root))
+if comfy_root not in sys.path:
+    sys.path.insert(0, comfy_root)
+
+# Mock comfy_aimdo to allow testing without platform-specific binary dependencies
+from unittest.mock import MagicMock
+comfy_aimdo_mock = MagicMock()
+comfy_aimdo_mock.__path__ = []
+sys.modules['comfy_aimdo'] = comfy_aimdo_mock
+sys.modules['comfy_aimdo.host_buffer'] = MagicMock()
+sys.modules['comfy_aimdo.torch'] = MagicMock()
+sys.modules['comfy_aimdo.model_vbar'] = MagicMock()
 
 # Add tests directory to python path
 tests_dir = os.path.dirname(os.path.abspath(__file__))

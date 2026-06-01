@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
+from comfy.ldm.cosmos.predict2 import apply_rotary_pos_emb
 
 from .config import _PREFIX, clamp_float, schedule_fraction
+
 
 
 def lerp(a: float, b: float, t: float) -> float:
@@ -221,6 +223,8 @@ def anima_untwist_self_attn_patch(
     rope_emb: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Monkey-patch for Anima Attention.compute_qkv (self-attention only)."""
+    from einops import rearrange
+
     def _call_orig(x_in, ctx_in, rope_in):
         if hasattr(original_compute_qkv, "__self__"):
             return original_compute_qkv(x_in, context=ctx_in, rope_emb=rope_in)
@@ -254,21 +258,39 @@ def anima_untwist_self_attn_patch(
     if block_index < int(cfg.get("start_block", 0)) or block_index > int(cfg.get("end_block", 27)):
         return _call_orig(x, context, rope_emb)
 
-    # Call original compute_qkv to get Q, K, V (with RoPE already applied)
+    # 1. Compute target Q, K, V
     q, k, v = _call_orig(x, context, rope_emb)
 
-
-    # Identify reference ranges
-    ref_ranges = cfg.get("ref_ranges", [])
-    if not ref_ranges:
+    # 2. Retrieve ref_tokens and rope_emb_ref
+    ref_tokens = cfg.get("ref_tokens", None)
+    rope_emb_ref = cfg.get("rope_emb_ref", None)
+    if ref_tokens is None or rope_emb_ref is None:
         return q, k, v
 
+    # 3. Project ref_tokens to reference keys, values and queries
+    k_r = self.k_proj(ref_tokens)
+    v_r = self.v_proj(ref_tokens)
+    q_r = self.q_proj(ref_tokens)
+
+    q_r, k_r, v_r = map(
+        lambda t: rearrange(t, "b ... (h d) -> b ... h d", h=self.n_heads, d=self.head_dim),
+        (q_r, k_r, v_r)
+    )
+
+    q_r = self.q_norm(q_r)
+    k_r = self.k_norm(k_r)
+    v_r = self.v_norm(v_r)
+
+    # 4. Apply RoPE to reference queries and keys using rope_emb_ref
+    q_r = apply_rotary_pos_emb(q_r, rope_emb_ref)
+    k_r = apply_rotary_pos_emb(k_r, rope_emb_ref)
+
+    # 5. Build scale vector
     high_scale = float(cfg.get("high_scale", 1.0))
     low_scale = float(cfg.get("low_scale", 1.0))
     beta = float(cfg.get("beta", 2.0))
     axes_dim = cfg.get("axes_dim", []) or []
 
-    # Build scale vector
     scale_vec = build_frequency_scale_vector(
         head_dim=int(self.head_dim),
         axes_dim=axes_dim,
@@ -279,42 +301,26 @@ def anima_untwist_self_attn_patch(
         dtype=k.dtype,
     ).view(1, 1, 1, -1)
 
-    k_out = k.clone()
-    for start, end in ref_ranges:
-        k_out[:, start:end, :, :] = k_out[:, start:end, :, :] * scale_vec
+    k_r = k_r * scale_vec
 
-    # QK adain
+    # 6. Apply QK AdaIN
     adain_strength = float(cfg.get("qk_adain_strength", 0.0))
-    target_range = cfg.get("target_range", None)
-    if adain_strength > 0.0 and target_range is not None:
-        target_start, target_end = target_range
-        q_out = q.clone()
-        ref_q_parts = [q[:, r_start:r_end, :, :] for r_start, r_end in ref_ranges]
-        ref_k_parts = [k[:, r_start:r_end, :, :] for r_start, r_end in ref_ranges]
-        if ref_q_parts and ref_k_parts:
-            ref_q = torch.cat(ref_q_parts, dim=1)
-            ref_k = torch.cat(ref_k_parts, dim=1)
+    if adain_strength > 0.0:
+        # Permute to [B, H, S, D]
+        target_q_perm = q.permute(0, 2, 1, 3)
+        ref_q_perm = q_r.permute(0, 2, 1, 3)
+        q_adain_perm = _adain_tokens(target_q_perm, ref_q_perm)
+        q = q * (1.0 - adain_strength) + q_adain_perm.permute(0, 2, 1, 3) * adain_strength
 
-            # Permute to [B, H, S, D]
-            target_q_perm = q_out[:, target_start:target_end, :, :].permute(0, 2, 1, 3)
-            ref_q_perm = ref_q.permute(0, 2, 1, 3)
-            q_adain_perm = _adain_tokens(target_q_perm, ref_q_perm)
-            q_adain = q_adain_perm.permute(0, 2, 1, 3)
+        target_k_perm = k.permute(0, 2, 1, 3)
+        ref_k_perm = k_r.permute(0, 2, 1, 3)
+        k_adain_perm = _adain_tokens(target_k_perm, ref_k_perm)
+        k = k * (1.0 - adain_strength) + k_adain_perm.permute(0, 2, 1, 3) * adain_strength
 
-            target_k_perm = k_out[:, target_start:target_end, :, :].permute(0, 2, 1, 3)
-            ref_k_perm = ref_k.permute(0, 2, 1, 3)
-            k_adain_perm = _adain_tokens(target_k_perm, ref_k_perm)
-            k_adain = k_adain_perm.permute(0, 2, 1, 3)
+    # 7. Concatenate target and reference keys/values along sequence dimension S (dim 1)
+    k_out = torch.cat([k, k_r], dim=1)
+    v_out = torch.cat([v, v_r], dim=1)
 
-            q_out[:, target_start:target_end, :, :] = (
-                q_out[:, target_start:target_end, :, :] * (1.0 - adain_strength)
-                + q_adain * adain_strength
-            )
-            k_out[:, target_start:target_end, :, :] = (
-                k_out[:, target_start:target_end, :, :] * (1.0 - adain_strength)
-                + k_adain * adain_strength
-            )
-            q = q_out
+    return q, k_out, v_out
 
-    return q, k_out, v
 

@@ -61,7 +61,14 @@ def test_anima_untwist_self_attn_patch():
     mock_self = MagicMock()
     mock_self.is_selfattn = True
     mock_self.head_dim = 128
+    mock_self.n_heads = 16
     mock_self._block_index = 5
+    mock_self.k_proj = MagicMock(side_effect=lambda x: torch.ones(x.shape[0], x.shape[1], 16 * 128))
+    mock_self.v_proj = MagicMock(side_effect=lambda x: torch.ones(x.shape[0], x.shape[1], 16 * 128))
+    mock_self.q_proj = MagicMock(side_effect=lambda x: torch.ones(x.shape[0], x.shape[1], 16 * 128))
+    mock_self.k_norm = MagicMock(side_effect=lambda x: x)
+    mock_self.v_norm = MagicMock(side_effect=lambda x: x)
+    mock_self.q_norm = MagicMock(side_effect=lambda x: x)
 
     # Mock original compute_qkv
     q = torch.ones(1, 100, 16, 128)
@@ -71,13 +78,13 @@ def test_anima_untwist_self_attn_patch():
 
     # Mock stack frame to inject transformer_options
     import sys
-    # We will simulate the frame structure by creating a dummy frame/local dict
-    # Or, we can test by calling it in a local context where `transformer_options` is in the local variables
+    ref_tokens = torch.ones(1, 40, 2048)
+    rope_emb_ref = torch.ones(1, 40, 1, 64, 2, 2)
     transformer_options = {
         "anima_untwist_rope": {
             "enabled": True,
-            "ref_ranges": [(60, 100)],
-            "target_range": (0, 60),
+            "ref_tokens": ref_tokens,
+            "rope_emb_ref": rope_emb_ref,
             "high_scale": 0.25,
             "low_scale": 1.5,
             "beta": 2.0,
@@ -96,14 +103,15 @@ def test_anima_untwist_self_attn_patch():
 
     q_out, k_out, v_out = run_patched_call()
 
-    # Original k was all ones. In the scaled range [60, 100], k should be scaled by build_frequency_scale_vector
-    # Let's verify k_out shape and values
-    assert k_out.shape == k.shape
-    # target range [0, 60] should be unchanged (all 1s)
-    assert torch.allclose(k_out[:, :60, :, :], torch.ones(1, 60, 16, 128))
-    # ref range [60, 100] should be scaled
+    # Original target was 100 tokens, reference was 40 tokens.
+    # The concatenated k_out should have sequence length 140.
+    assert k_out.shape == (1, 140, 16, 128)
+    # target range [0, 100] should be unchanged (all 1s)
+    assert torch.allclose(k_out[:, :100, :, :], torch.ones(1, 100, 16, 128))
+    # ref range [100:140] should be scaled
     scale_vec = build_frequency_scale_vector(
         128, (44, 42, 42), 0.25, 1.5, 2.0, torch.device("cpu"), torch.float32
     ).view(1, 1, 1, -1)
-    expected_ref = torch.ones(1, 40, 16, 128) * scale_vec
-    assert torch.allclose(k_out[:, 60:100, :, :], expected_ref)
+    expected_ref = torch.ones(1, 40, 16, 128) * scale_vec * 2.0
+    assert torch.allclose(k_out[:, 100:140, :, :], expected_ref)
+
