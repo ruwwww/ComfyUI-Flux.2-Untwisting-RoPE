@@ -480,7 +480,7 @@ class AnimaUntwistRoPE:
             cond_or_uncond = args.get("cond_or_uncond", None)
 
             progress = progress_from_timestep(timestep)
-            active, _t = schedule_fraction(progress, start_percent, end_percent)
+            active, t_active = schedule_fraction(progress, start_percent, end_percent)
 
             to = dict(c.get("transformer_options", {}) or {})
             
@@ -510,9 +510,9 @@ class AnimaUntwistRoPE:
                 )
                 ref = ref_resized.view(Br, Cr, Tr, H_target_padded, W_target_padded)
 
-                # Blend noise with reference latent dynamically to match target noise level progress
+                # Blend noise with reference latent dynamically to match target active progress
                 noise = torch.randn_like(ref)
-                ref = ref * progress + noise * (1.0 - progress)
+                ref = ref * t_active + noise * (1.0 - t_active)
 
                 ref_padded = comfy.ldm.common_dit.pad_to_patch_size(ref, (patch_temporal, patch_spatial, patch_spatial))
                 
@@ -524,8 +524,9 @@ class AnimaUntwistRoPE:
 
 
             # Schedule our scales
-            high_scale = lerp(base_high_start, base_high_end, progress)
-            low_scale = lerp(base_low_start, base_low_end, progress)
+            high_scale = lerp(base_high_start, base_high_end, t_active)
+            low_scale = lerp(base_low_start, base_low_end, t_active)
+
 
             to["anima_untwist_rope"] = {
                 "enabled": bool(active and ref_len > 0),
