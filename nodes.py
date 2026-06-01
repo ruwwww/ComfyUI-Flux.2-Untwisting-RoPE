@@ -507,7 +507,9 @@ class AnimaUntwistRoPE:
                 # Blend noise with reference latent dynamically using variance-preserving DDPM scheduling
                 scale_ref = math.sqrt(t_active)
                 scale_noise = math.sqrt(1.0 - t_active)
-                noise = torch.randn_like(ref)
+                # Draw consistent noise using a fixed-seed generator to ensure reference latent stability across steps
+                generator = torch.Generator(device=ref.device).manual_seed(42)
+                noise = torch.randn(ref.shape, generator=generator, device=ref.device, dtype=ref.dtype)
                 ref_noisy = ref * scale_ref + noise * scale_noise
 
                 # Patchify the reference latent at its own native resolution!
