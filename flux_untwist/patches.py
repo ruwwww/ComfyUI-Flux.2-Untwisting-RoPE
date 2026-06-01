@@ -211,3 +211,110 @@ def flux_untwist_attn1_patch(
                 )
 
     return {"q": q_out, "k": k_out, "v": v, "pe": pe, "attn_mask": attn_mask}
+
+
+def anima_untwist_self_attn_patch(
+    original_compute_qkv: Any,
+    self: Any,
+    x: torch.Tensor,
+    context: Optional[torch.Tensor] = None,
+    rope_emb: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Monkey-patch for Anima Attention.compute_qkv (self-attention only)."""
+    def _call_orig(x_in, ctx_in, rope_in):
+        if hasattr(original_compute_qkv, "__self__"):
+            return original_compute_qkv(x_in, context=ctx_in, rope_emb=rope_in)
+        return original_compute_qkv(self, x_in, context=ctx_in, rope_emb=rope_in)
+
+    # Only patch self-attention
+    if not getattr(self, "is_selfattn", False):
+        return _call_orig(x, context, rope_emb)
+
+    # Walk up the call stack to retrieve transformer_options
+    import sys
+    transformer_options = None
+    frame = sys._getframe(1)
+    for _ in range(10):
+        if frame is None:
+            break
+        to = frame.f_locals.get("transformer_options", None)
+        if isinstance(to, dict):
+            transformer_options = to
+            break
+        frame = frame.f_back
+
+    if transformer_options is None:
+        return _call_orig(x, context, rope_emb)
+
+    cfg = transformer_options.get("anima_untwist_rope", None)
+    if not isinstance(cfg, dict) or not cfg.get("enabled", False):
+        return _call_orig(x, context, rope_emb)
+
+    block_index = getattr(self, "_block_index", -1)
+    if block_index < int(cfg.get("start_block", 0)) or block_index > int(cfg.get("end_block", 27)):
+        return _call_orig(x, context, rope_emb)
+
+    # Call original compute_qkv to get Q, K, V (with RoPE already applied)
+    q, k, v = _call_orig(x, context, rope_emb)
+
+
+    # Identify reference ranges
+    ref_ranges = cfg.get("ref_ranges", [])
+    if not ref_ranges:
+        return q, k, v
+
+    high_scale = float(cfg.get("high_scale", 1.0))
+    low_scale = float(cfg.get("low_scale", 1.0))
+    beta = float(cfg.get("beta", 2.0))
+    axes_dim = cfg.get("axes_dim", []) or []
+
+    # Build scale vector
+    scale_vec = build_frequency_scale_vector(
+        head_dim=int(self.head_dim),
+        axes_dim=axes_dim,
+        high_scale=high_scale,
+        low_scale=low_scale,
+        beta=beta,
+        device=k.device,
+        dtype=k.dtype,
+    ).view(1, 1, 1, -1)
+
+    k_out = k.clone()
+    for start, end in ref_ranges:
+        k_out[:, start:end, :, :] = k_out[:, start:end, :, :] * scale_vec
+
+    # QK adain
+    adain_strength = float(cfg.get("qk_adain_strength", 0.0))
+    target_range = cfg.get("target_range", None)
+    if adain_strength > 0.0 and target_range is not None:
+        target_start, target_end = target_range
+        q_out = q.clone()
+        ref_q_parts = [q[:, r_start:r_end, :, :] for r_start, r_end in ref_ranges]
+        ref_k_parts = [k[:, r_start:r_end, :, :] for r_start, r_end in ref_ranges]
+        if ref_q_parts and ref_k_parts:
+            ref_q = torch.cat(ref_q_parts, dim=1)
+            ref_k = torch.cat(ref_k_parts, dim=1)
+
+            # Permute to [B, H, S, D]
+            target_q_perm = q_out[:, target_start:target_end, :, :].permute(0, 2, 1, 3)
+            ref_q_perm = ref_q.permute(0, 2, 1, 3)
+            q_adain_perm = _adain_tokens(target_q_perm, ref_q_perm)
+            q_adain = q_adain_perm.permute(0, 2, 1, 3)
+
+            target_k_perm = k_out[:, target_start:target_end, :, :].permute(0, 2, 1, 3)
+            ref_k_perm = ref_k.permute(0, 2, 1, 3)
+            k_adain_perm = _adain_tokens(target_k_perm, ref_k_perm)
+            k_adain = k_adain_perm.permute(0, 2, 1, 3)
+
+            q_out[:, target_start:target_end, :, :] = (
+                q_out[:, target_start:target_end, :, :] * (1.0 - adain_strength)
+                + q_adain * adain_strength
+            )
+            k_out[:, target_start:target_end, :, :] = (
+                k_out[:, target_start:target_end, :, :] * (1.0 - adain_strength)
+                + k_adain * adain_strength
+            )
+            q = q_out
+
+    return q, k_out, v
+

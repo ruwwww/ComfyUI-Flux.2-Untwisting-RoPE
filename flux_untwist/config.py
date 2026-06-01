@@ -109,3 +109,13 @@ def safe_axes_dim(params_or_model: Any) -> Tuple[int, ...]:
         return tuple(int(x) for x in axes)
     except Exception:
         return tuple()
+
+
+def anima_axes_dim_from_head_dim(head_dim: int) -> Tuple[int, int, int]:
+    """Compute Anima 3D RoPE axes dimensions: (dim_t, dim_h, dim_w)."""
+    hd = max(0, int(head_dim))
+    dim_h = (hd // 6) * 2
+    dim_w = dim_h
+    dim_t = hd - 2 * dim_h
+    return (dim_t, dim_h, dim_w)
+

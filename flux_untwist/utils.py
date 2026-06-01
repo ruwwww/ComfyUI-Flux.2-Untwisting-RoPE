@@ -116,6 +116,66 @@ def _looks_like_flux(obj: Any) -> bool:
     )
 
 
+def _looks_like_anima(obj: Any) -> bool:
+    if obj is None:
+        return False
+    class_name = type(obj).__name__.lower()
+    if "anima" in class_name or "minitraindit" in class_name:
+        return True
+    return (
+        hasattr(obj, "blocks")
+        and hasattr(obj, "x_embedder")
+        and hasattr(obj, "pos_embedder")
+        and hasattr(obj, "t_embedder")
+    )
+
+
+
+def safe_get_anima_model(model_patcher: Any) -> Any:
+    """Find the wrapped Anima diffusion model in common ComfyUI ModelPatcher layouts."""
+    roots: List[Any] = []
+    if hasattr(model_patcher, "model"):
+        roots.append(model_patcher.model)
+    roots.append(model_patcher)
+
+    attr_paths = (
+        "diffusion_model",
+        "model.diffusion_model",
+        "model.model.diffusion_model",
+        "inner_model.diffusion_model",
+        "model.inner_model.diffusion_model",
+    )
+    for root in roots:
+        for path in attr_paths:
+            obj = root
+            ok = True
+            for part in path.split("."):
+                if not hasattr(obj, part):
+                    ok = False
+                    break
+                obj = getattr(obj, part)
+            if ok and _looks_like_anima(obj):
+                return obj
+
+    seen = set()
+    stack = list(roots)
+    while stack and len(seen) < 512:
+        obj = stack.pop()
+        if id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        if _looks_like_anima(obj):
+            return obj
+        for name in ("model", "inner_model", "diffusion_model", "unet", "wrapped"):
+            if hasattr(obj, name):
+                try:
+                    stack.append(getattr(obj, name))
+                except Exception:
+                    pass
+    raise RuntimeError("Could not locate an Anima-like diffusion model on the supplied MODEL.")
+
+
+
 def process_latent_for_model(model_patcher: Any, latent_samples: torch.Tensor) -> torch.Tensor:
     """Convert a ComfyUI LATENT tensor to model input latent space when available."""
     processor = None
